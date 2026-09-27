@@ -5,7 +5,9 @@
 #
 # Enters "screenshot mode": select a rectangular area of the screen with
 # the mouse, and it's saved to ~/Pictures/Screenshots/ with a timestamped
-# filename (permissions locked to 0600).
+# filename (permissions locked to 0600), then copied to the clipboard
+# (xclip on X11, wl-copy on Wayland — best-effort; a missing/failing
+# clipboard tool only warns, since the screenshot is already saved by then).
 #
 # The real compatibility boundary here is the display server and desktop
 # environment, not the Linux distribution — a distro's package manager has
@@ -57,6 +59,7 @@ case "${1:-}" in
 esac
 
 log()  { printf '==> %s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 path="$HOME/Pictures/Screenshots/"
@@ -111,9 +114,32 @@ else
     die "no graphical session detected (\$WAYLAND_DISPLAY and \$DISPLAY are both unset)"
 fi
 
+copy_to_clipboard() {
+    # Best-effort: the screenshot is already saved at this point, so a
+    # missing/failing clipboard tool is a warning, not a failure.
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        if command -v wl-copy >/dev/null 2>&1; then
+            wl-copy --type image/png < "$screenshot" \
+                && log "Copied to clipboard (wl-copy)." \
+                || warn "wl-copy failed; screenshot saved but not copied to clipboard"
+        else
+            warn "'wl-copy' not found (wl-clipboard package); screenshot saved but not copied to clipboard"
+        fi
+    elif [ -n "${DISPLAY:-}" ]; then
+        if command -v xclip >/dev/null 2>&1; then
+            xclip -selection clipboard -t image/png -i "$screenshot" \
+                && log "Copied to clipboard (xclip)." \
+                || warn "xclip failed; screenshot saved but not copied to clipboard"
+        else
+            warn "'xclip' not found; screenshot saved but not copied to clipboard (xsel isn't used here — it doesn't reliably handle binary image data)"
+        fi
+    fi
+}
+
 if [ -s "$screenshot" ]; then
     chmod 0600 "$screenshot"
     log "Saved: ${screenshot}"
+    copy_to_clipboard
 else
     rm -f "$screenshot"
     die "no screenshot was saved (selection cancelled, or the capture tool failed)"
