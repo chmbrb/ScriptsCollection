@@ -222,13 +222,13 @@ detect_and_run() {
             command -v pkg >/dev/null 2>&1 || die "FreeBSD detected but 'pkg' not found"
             log "Using package manager: pkg (FreeBSD)"
             update_pkg_freebsd
-            return 0
+            return $?
             ;;
         OpenBSD)
             command -v pkg_add >/dev/null 2>&1 || die "OpenBSD detected but 'pkg_add' not found"
             log "Using package manager: pkg_add (OpenBSD)"
             update_pkg_add_openbsd
-            return 0
+            return $?
             ;;
     esac
 
@@ -239,7 +239,7 @@ detect_and_run() {
         if command -v "$bin" >/dev/null 2>&1; then
             log "Using package manager: ${bin}"
             "$handler"
-            return 0
+            return $?
         fi
     done
 
@@ -249,7 +249,10 @@ detect_and_run() {
 main() {
     print_os_info
     detect_and_run
-    log "Done."
+    local status=$?
+    [ "$status" -eq 0 ] && log "Done."
+    return "$status"
 }
 
 main
+exit $?
