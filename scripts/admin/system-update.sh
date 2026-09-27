@@ -5,7 +5,9 @@
 # Detects whichever package manager is actually installed on the running
 # system (rather than matching against a fixed distro list) and runs its
 # update + upgrade sequence. Works across Linux distributions and the
-# common BSDs.
+# common BSDs. On FreeBSD/OpenBSD this also patches the base system
+# (freebsd-update / syspatch), since pkg/pkg_add only cover third-party
+# packages and never touch the kernel or base userland.
 #
 # Usage:
 #   ./system-update.sh [-y|--yes] [-n|--dry-run] [-h|--help]
@@ -172,6 +174,10 @@ update_slackpkg() {
 }
 
 update_pkg_freebsd() {
+    # freebsd-update patches the base system (kernel, base userland, security
+    # errata) — a separate layer from pkg, which only manages third-party
+    # ports/packages and never touches the kernel or base system at all.
+    run freebsd-update fetch install
     run pkg update
     if [ "$ASSUME_YES" -eq 1 ]; then
         run pkg upgrade -y
@@ -181,6 +187,11 @@ update_pkg_freebsd() {
 }
 
 update_pkg_add_openbsd() {
+    # syspatch applies base-system security/errata patches within the
+    # current release (kernel included) — separate from pkg_add, which only
+    # manages third-party packages. (Moving to a new OpenBSD release is a
+    # distinct, more manual operation via sysupgrade — out of scope here.)
+    run syspatch
     run pkg_add -u
 }
 
