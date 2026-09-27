@@ -13,11 +13,15 @@
 #   - Version-held/pinned kernel packages are never removal candidates.
 #   - At least 2 kernels (running + 1 other) are always kept; --keep=0 is
 #     refused outright.
-#   - Only ever removes actual installed packages via the package manager
-#     (dnf/apt/zypper/vkpurge) and lets it handle bootloader/initramfs
-#     regeneration — this script never calls grubby/update-grub/efibootmgr
-#     directly, and never touches rescue/recovery boot entries, since those
-#     aren't candidate packages in the first place.
+#   - Only ever removes actual installed packages via the package manager,
+#     never touching rescue/recovery boot entries directly (those aren't
+#     candidate packages in the first place). Bootloader regeneration is
+#     handled per manager: Fedora/RHEL's BLS entries are rewritten directly
+#     by the kernel package's own RPM scriptlet (no extra step needed);
+#     zypper/vkpurge regenerate their own bootloader config as part of their
+#     native cleanup; apt's classic aggregate grub.cfg is explicitly
+#     rebuilt via `update-grub` after a successful purge, since relying on
+#     its postrm hook alone proved unreliable in practice.
 #
 # Usage:
 #   ./cleanup-old-kernels.sh [-k N|--keep=N] [-y|--yes] [-n|--dry-run] [-h|--help]
@@ -265,7 +269,21 @@ kernel_cleanup_apt() {
     fi
 
     log "Removing ${#CANDIDATES[@]} old kernel(s) ..."
-    as_root apt-get purge -y "${REMOVE_PKGS[@]}"
+    if ! as_root apt-get purge -y "${REMOVE_PKGS[@]}"; then
+        return 1
+    fi
+
+    # Unlike Fedora's BLS boot entries (self-contained per kernel, rewritten
+    # directly by kernel-core's own RPM scriptlet — no aggregate regen step),
+    # Debian/Ubuntu's classic GRUB setup uses one generated grub.cfg that
+    # must be rebuilt to drop stale entries. Relying on the postrm hook to
+    # do this isn't reliable across all configurations, so call it explicitly.
+    if command -v update-grub >/dev/null 2>&1; then
+        log "Regenerating GRUB configuration (update-grub) ..."
+        as_root update-grub || warn "update-grub failed after removing kernels — regenerate it manually to avoid stale boot entries"
+    else
+        warn "'update-grub' not found; if this system uses GRUB, regenerate its config manually to avoid stale boot entries"
+    fi
 }
 
 # --- zypper (openSUSE) — delegate to its native tool ------------------------
