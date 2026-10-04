@@ -3,33 +3,42 @@
 # docker-image-update.sh — Batch-update remotely hosted Docker images.
 #
 # Walks every image present on the local Docker daemon and re-pulls it from
-# its origin registry, skipping images that were built locally (which have
-# no RepoDigests, since they were never pulled from or pushed to a
-# registry). This does NOT recreate or restart any containers — it only
-# refreshes the image cache, so a container must still be recreated
+# its origin registry. An image counts as remotely hosted only if one of its
+# RepoDigests belongs to the same repository as the repo:tag being checked;
+# this skips images built locally and images merely retagged from a pulled
+# one (which inherit the original's digests). Images that were built locally
+# and then pushed look identical to pulled ones, so use --skip for those.
+# This does NOT recreate or restart any containers — it only refreshes the
+# image cache, so a container must still be recreated
 # (e.g. `docker compose up -d`, `docker stop && docker rm && docker run`)
 # to actually start using an updated image.
 #
 # Usage:
-#   ./docker-image-update.sh [-y|--yes] [-n|--dry-run] [-h|--help]
+#   ./docker-image-update.sh [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-h|--help]
 #
-#   -y, --yes       Non-interactive: skip the confirmation prompt.
-#   -n, --dry-run   List what would be pulled, without pulling anything.
-#   -h, --help      Show this help text.
+#   -y, --yes          Non-interactive: skip the confirmation prompt.
+#   -n, --dry-run      List what would be pulled, without pulling anything.
+#   -s, --skip PATTERN Never pull images matching PATTERN (shell glob, matched
+#                      against both repo:tag and repo). Repeatable.
+#                      e.g. --skip 'myorg/*' --skip redis:latest
+#   -h, --help         Show this help text.
 
 set -uo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 ASSUME_YES=0
 DRY_RUN=0
+SKIP_PATTERNS=()
 
 usage() {
     cat <<EOF
-Usage: ${SCRIPT_NAME} [-y|--yes] [-n|--dry-run] [-h|--help]
+Usage: ${SCRIPT_NAME} [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-h|--help]
 
-  -y, --yes       Non-interactive: skip the confirmation prompt.
-  -n, --dry-run   List what would be pulled, without pulling anything.
-  -h, --help      Show this help text.
+  -y, --yes          Non-interactive: skip the confirmation prompt.
+  -n, --dry-run      List what would be pulled, without pulling anything.
+  -s, --skip PATTERN Never pull images matching PATTERN (shell glob, matched
+                     against both repo:tag and repo). Repeatable.
+  -h, --help         Show this help text.
 EOF
 }
 
@@ -40,6 +49,14 @@ while [ $# -gt 0 ]; do
             ;;
         -n|--dry-run)
             DRY_RUN=1
+            ;;
+        -s|--skip)
+            [ $# -ge 2 ] || { echo "${SCRIPT_NAME}: $1 requires a pattern" >&2; usage >&2; exit 1; }
+            SKIP_PATTERNS+=("$2")
+            shift
+            ;;
+        --skip=*)
+            SKIP_PATTERNS+=("${1#--skip=}")
             ;;
         -h|--help)
             usage
@@ -81,17 +98,61 @@ fi
 
 REMOTE_IMAGES=()
 LOCAL_IMAGES=()
+SKIPPED_IMAGES=()
+
+# Strip the implicit Docker Hub prefixes so "nginx", "library/nginx" and
+# "docker.io/library/nginx" compare equal.
+normalize_repo() {
+    local r="$1"
+    r="${r#docker.io/}"
+    r="${r#index.docker.io/}"
+    r="${r#library/}"
+    printf '%s' "$r"
+}
+
+# True if the ref matches any --skip pattern (against repo:tag or repo).
+is_skipped() {
+    local ref="$1" repo="${1%:*}" pattern
+    for pattern in "${SKIP_PATTERNS[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ "$ref" == $pattern || "$repo" == $pattern ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# True if one of the ref's RepoDigests belongs to the ref's own repository.
+# RepoDigests are per image ID, so a retagged image inherits the digests of
+# the image it was tagged from; comparing repo names filters those out.
+has_own_digest() {
+    local ref="$1" want digest
+    want="$(normalize_repo "${ref%:*}")"
+    while IFS= read -r digest; do
+        [ -n "$digest" ] || continue
+        [ "$(normalize_repo "${digest%@*}")" = "$want" ] && return 0
+    done < <("${DOCKER_CMD[@]}" image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null)
+    return 1
+}
 
 for ref in "${ALL_IMAGES[@]}"; do
-    digests="$("${DOCKER_CMD[@]}" image inspect "$ref" --format '{{json .RepoDigests}}' 2>/dev/null)"
-    if [ -z "$digests" ] || [ "$digests" = "[]" ] || [ "$digests" = "null" ]; then
-        LOCAL_IMAGES+=("$ref")
-    else
+    if is_skipped "$ref"; then
+        SKIPPED_IMAGES+=("$ref")
+    elif has_own_digest "$ref"; then
         REMOTE_IMAGES+=("$ref")
+    else
+        LOCAL_IMAGES+=("$ref")
     fi
 done
 
-log "Found ${#ALL_IMAGES[@]} image(s): ${#REMOTE_IMAGES[@]} remotely hosted, ${#LOCAL_IMAGES[@]} built locally."
+log "Found ${#ALL_IMAGES[@]} image(s): ${#REMOTE_IMAGES[@]} remotely hosted, ${#LOCAL_IMAGES[@]} built locally, ${#SKIPPED_IMAGES[@]} skipped by --skip."
+
+if [ "${#SKIPPED_IMAGES[@]}" -gt 0 ]; then
+    log "Skipping image(s) matching --skip:"
+    for ref in "${SKIPPED_IMAGES[@]}"; do
+        printf '      - %s\n' "$ref"
+    done
+fi
 
 if [ "${#LOCAL_IMAGES[@]}" -gt 0 ]; then
     log "Skipping locally built image(s) (no registry to pull from):"
@@ -156,6 +217,7 @@ printf '      already latest: %d\n' "${#UNCHANGED[@]}"
 printf '      failed:         %d\n' "${#FAILED[@]}"
 for ref in "${FAILED[@]}"; do printf '        - %s\n' "$ref"; done
 printf '      skipped local:  %d\n' "${#LOCAL_IMAGES[@]}"
+printf '      skipped (--skip): %d\n' "${#SKIPPED_IMAGES[@]}"
 
 if [ "${#UPDATED[@]}" -gt 0 ]; then
     log "Note: pulled images are not in use until their containers are recreated."
