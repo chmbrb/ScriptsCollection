@@ -14,13 +14,16 @@
 # to actually start using an updated image.
 #
 # Usage:
-#   ./docker-image-update.sh [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-h|--help]
+#   ./docker-image-update.sh [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-f|--file FILE]... [-h|--help]
 #
 #   -y, --yes          Non-interactive: skip the confirmation prompt.
 #   -n, --dry-run      List what would be pulled, without pulling anything.
 #   -s, --skip PATTERN Never pull images matching PATTERN (shell glob, matched
 #                      against both repo:tag and repo). Repeatable.
 #                      e.g. --skip 'myorg/*' --skip redis:latest
+#   -f, --file FILE    Read skip patterns from FILE, one per line (same glob
+#                      semantics as --skip). Blank lines and lines starting
+#                      with '#' are ignored. Repeatable; combines with --skip.
 #   -h, --help         Show this help text.
 
 set -uo pipefail
@@ -32,14 +35,31 @@ SKIP_PATTERNS=()
 
 usage() {
     cat <<EOF
-Usage: ${SCRIPT_NAME} [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-h|--help]
+Usage: ${SCRIPT_NAME} [-y|--yes] [-n|--dry-run] [-s|--skip PATTERN]... [-f|--file FILE]... [-h|--help]
 
   -y, --yes          Non-interactive: skip the confirmation prompt.
   -n, --dry-run      List what would be pulled, without pulling anything.
   -s, --skip PATTERN Never pull images matching PATTERN (shell glob, matched
                      against both repo:tag and repo). Repeatable.
+  -f, --file FILE    Read skip patterns from FILE, one per line. Blank lines
+                     and lines starting with '#' are ignored. Repeatable.
   -h, --help         Show this help text.
 EOF
+}
+
+# Append each pattern in the given file (one per line) to SKIP_PATTERNS.
+load_skip_file() {
+    local file="$1" line
+    [ -f "$file" ] && [ -r "$file" ] || { echo "${SCRIPT_NAME}: cannot read skip file '$file'" >&2; exit 1; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        SKIP_PATTERNS+=("$line")
+    done < "$file"
 }
 
 while [ $# -gt 0 ]; do
@@ -57,6 +77,14 @@ while [ $# -gt 0 ]; do
             ;;
         --skip=*)
             SKIP_PATTERNS+=("${1#--skip=}")
+            ;;
+        -f|--file)
+            [ $# -ge 2 ] || { echo "${SCRIPT_NAME}: $1 requires a file" >&2; usage >&2; exit 1; }
+            load_skip_file "$2"
+            shift
+            ;;
+        --file=*)
+            load_skip_file "${1#--file=}"
             ;;
         -h|--help)
             usage
