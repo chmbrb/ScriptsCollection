@@ -2,9 +2,13 @@
 #
 # flatpak-update.sh — Update installed Flatpak apps/runtimes.
 #
-# Flatpak-only, deliberately: Flatpak never requires root (both --user and
+# Flatpak-only, deliberately: Flatpak doesn't require root (both --user and
 # --system scope operations run as the invoking user; system-scope changes
-# go through polkit, not classic sudo). Snap is the opposite — it always
+# go through polkit, not classic sudo). Caveat: polkit only auto-allows
+# system-scope updates for an active *local* session. Over SSH the same
+# actions fall to auth_admin and prompt for an admin password, so when run
+# over SSH as a non-root user the system-scope update is skipped (listing
+# still works); run it under sudo to include it. Snap is the opposite — it always
 # requires root, confirmed live ("access denied (try with sudo)") — so its
 # equivalent lives in scripts/admin/snap-update.sh instead. Anything
 # root-required belongs in admin/, anything a normal user can run belongs
@@ -37,6 +41,9 @@ Usage: ${SCRIPT_NAME} [-y|--yes] [-n|--dry-run] [-h|--help]
   -n, --dry-run   Explicit no-op: list pending updates (also the default
                    with no flags).
   -h, --help      Show this help text.
+
+Exit status: 0 on success, 1 if an update failed, 2 if the system-scope
+update was skipped because of an SSH session (and no update failed).
 EOF
 }
 
@@ -84,8 +91,19 @@ if [ "$any_pending" -eq 0 ]; then
     exit 0
 fi
 
+# Over SSH (and not root) a system-scope update would hit a polkit
+# auth_admin prompt, so leave it out rather than stall or fail.
+skip_system=0
+if [ "$(id -u)" -ne 0 ] && [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
+    skip_system=1
+fi
+
 if [ "$DRY_RUN" -eq 1 ] || [ "$ASSUME_YES" -ne 1 ]; then
-    printf '[would run] flatpak update -y --noninteractive\n'
+    if [ "$skip_system" -eq 1 ]; then
+        log "SSH session detected: system-scope update would be skipped (run under sudo to include it)."
+    else
+        printf '[would run] flatpak update -y --noninteractive\n'
+    fi
     printf '[would run] flatpak update -y --noninteractive --user\n'
     log "Nothing updated. Re-run with --yes to actually update."
     exit 0
@@ -93,6 +111,11 @@ fi
 
 log "Updating ..."
 status=0
-flatpak update -y --noninteractive || status=1
-flatpak update -y --noninteractive --user || status=1
+if [ "$skip_system" -eq 1 ]; then
+    log "SSH session detected: skipping system-scope update (polkit requires admin auth over SSH; run under sudo to include it)."
+    status=2
+else
+    flatpak update -y --noninteractive || status=1
+fi
+flatpak update -y --noninteractive --user || status=1  # a real failure outranks the skip
 exit "$status"
